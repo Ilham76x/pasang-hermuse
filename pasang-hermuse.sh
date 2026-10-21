@@ -34,6 +34,14 @@ die()  { printf '\n[paham] BERHENTI: %s\n' "$*" >&2; exit 1; }
 IN=/dev/stdin
 [ -r /dev/tty ] && IN=/dev/tty
 
+# Mode "boot" (argumen: boot) — dipanggil setup script template prepare.sh
+# saat workspace pertama kali boot: tidak ada terminal dan tidak ada orang,
+# jadi semua pertanyaan dilewati; token bot disambungkan belakangan lewat
+# /root/sambungkan-bot.sh setelah pemilik login.
+MODE="${1:-interaktif}"
+SKIP_TANYA=0
+[ "$MODE" = "boot" ] && SKIP_TANYA=1
+
 # --- 0. Harus root ---------------------------------------------------
 [ "$(id -u)" -eq 0 ] || die "Jalankan sebagai root. Masuk dulu: sudo -i (atau ssh root@localhost dari user biasa), lalu ulangi."
 
@@ -107,6 +115,51 @@ hermes config set model.base_url http://127.0.0.1:20128/v1 || warn "config model
 hermes config set model.default gemini/gemini-3.8-flash    || warn "config model.default gagal."
 
 # --- 7. Token bot uji + ID Telegram ---------------------------------------
+if [ "$SKIP_TANYA" = "1" ]; then
+  log "Langkah 7/8 (mode boot): token dilewati — membuat /root/sambungkan-bot.sh untuk nanti."
+  cat > /root/sambungkan-bot.sh <<'EOF'
+#!/usr/bin/env bash
+# sambungkan-bot.sh — jalankan SEKALI setelah login SSH ke workspace baru:
+# memasukkan token bot uji ke ~/.hermes/.env lalu menyalakan gateway.
+set -uo pipefail
+[ "$(id -u)" -eq 0 ] || { echo "Jalankan sebagai root."; exit 1; }
+IN=/dev/stdin; [ -r /dev/tty ] && IN=/dev/tty
+printf 'ID Telegram kamu [6085361150]: '
+read -r TGID < "$IN" || TGID=""
+[ -z "${TGID:-}" ] && TGID=6085361150
+TOKEN=""
+while [ -z "$TOKEN" ]; do
+  printf 'Tempel TOKEN BOT UJI dari BotFather (ketikan disembunyikan): '
+  read -rs TOKEN < "$IN" || TOKEN=""
+  printf '\n'
+  case "$TOKEN" in
+    *:*) : ;;
+    *) echo "Format token salah, ulangi."; TOKEN="" ;;
+  esac
+done
+mkdir -p "$HOME/.hermes"
+ENV_FILE="$HOME/.hermes/.env"
+touch "$ENV_FILE"
+grep -v -E '^(TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_USERS|OPENAI_API_KEY)=' "$ENV_FILE" > "$ENV_FILE.tmp" || true
+mv "$ENV_FILE.tmp" "$ENV_FILE"
+{
+  printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TOKEN"
+  printf 'TELEGRAM_ALLOWED_USERS=%s\n' "$TGID"
+  printf 'OPENAI_API_KEY=sk-hermuse-lokal\n'
+} >> "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+bash "$HOME/Hermuse/mulai-gateway.sh"
+echo "Gateway dinyalakan — coba kirim pesan ke bot ujimu di Telegram."
+EOF
+  chmod +x /root/sambungkan-bot.sh
+  cat > /root/BACA-DULU.txt <<'EOF'
+Workspace ini sudah terpasang Hermuse secara otomatis.
+Satu langkah terakhir untuk menyalakan bot Telegram:
+    bash /root/sambungkan-bot.sh
+(lalu tempel token bot ujimu saat diminta).
+Password dashboard 9Router tersimpan di ~/Hermuse/.dashboard-pw
+EOF
+else
 log "Langkah 7/8: data bot Telegram (ketik di sini, tidak lewat chat)."
 TGID_DEFAULT=6085361150
 printf 'ID Telegram kamu [%s]: ' "$TGID_DEFAULT" >&2
@@ -140,6 +193,7 @@ mv "$ENV_FILE.tmp" "$ENV_FILE"
 } >> "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 log ".env ditulis (chmod 600). Token tidak ditampilkan di layar/log mana pun."
+fi
 
 # --- 8. Nyalakan 9Router + gateway + watchdog ------------------------------
 log "Langkah 8/8: menyalakan 9Router dan gateway..."
@@ -166,11 +220,17 @@ cat > "$REPO_DIR/jaga.sh" <<'EOF'
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 curl -s -m 8 -o /dev/null http://127.0.0.1:20128/dashboard || bash "$D/restart-9router.sh" > /dev/null 2>&1
-ps aux | grep -q "[g]ateway.*run" || bash "$D/mulai-gateway.sh" > /dev/null 2>&1
+if grep -q '^TELEGRAM_BOT_TOKEN=' "$HOME/.hermes/.env" 2>/dev/null; then
+  ps aux | grep -q "[g]ateway.*run" || bash "$D/mulai-gateway.sh" > /dev/null 2>&1
+fi
 EOF
 chmod +x "$REPO_DIR/jaga.sh"
 
-bash "$REPO_DIR/mulai-gateway.sh" || warn "gateway gagal dinyalakan — cek $REPO_DIR/gateway.log."
+if [ "$SKIP_TANYA" = "1" ]; then
+  log "Mode boot: gateway TIDAK dinyalakan (token belum ada) — jalankan /root/sambungkan-bot.sh setelah login."
+else
+  bash "$REPO_DIR/mulai-gateway.sh" || warn "gateway gagal dinyalakan — cek $REPO_DIR/gateway.log."
+fi
 
 # Watchdog cron tiap 5 menit + sekali saat boot.
 ( crontab -l 2>/dev/null | grep -v 'Hermuse/jaga.sh' | grep -v 'Hermuse/mulai-gateway.sh'; \
